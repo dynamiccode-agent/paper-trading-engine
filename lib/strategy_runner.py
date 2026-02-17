@@ -80,6 +80,9 @@ class StrategyRunner:
         self.min_signal_score = min_signal_score
         self.max_signals = max_signals
         self.position_sizing = position_sizing
+        self.no_signal_cycles = 0  # Track consecutive cycles with no signals
+        self.last_signal_check_time = None  # Track last time we checked for signals
+        self.fallback_activated = False  # Track if fallback already executed
     
     def get_oracle_signals(self, market: str = 'US') -> List[dict]:
         """
@@ -184,8 +187,97 @@ class StrategyRunner:
         signals = self.get_oracle_signals(market='US')
         
         if not signals:
-            logger.warning("No signals found")
+            # Only increment cycle counter once per minute (avoid counting all wallets)
+            current_time = datetime.now()
+            if self.last_signal_check_time is None or (current_time - self.last_signal_check_time).total_seconds() >= 60:
+                self.no_signal_cycles += 1
+                self.last_signal_check_time = current_time
+                logger.warning(f"No signals found (cycle {self.no_signal_cycles})")
+            else:
+                logger.warning(f"No signals found (cycle {self.no_signal_cycles}, already counted)")
+            
+            # FALLBACK: After 3 cycles with no signals, place proof-of-life trade
+            from .fallback_strategy import FallbackStrategy
+            
+            if FallbackStrategy.should_activate_fallback(self.no_signal_cycles) and not self.fallback_activated:
+                logger.info("🔄 FALLBACK ACTIVATED - Placing proof-of-life trade")
+                
+                # Generate proof-of-life signal (AAPL, 1 share)
+                proof_signal = FallbackStrategy.generate_proof_of_life_signal()
+                
+                # Check if already have AAPL position
+                if proof_signal['ticker'] in position_tickers:
+                    logger.info(f"⏭️  Proof-of-life SKIPPED - already have {proof_signal['ticker']} position")
+                    return {
+                        'error': 'FALLBACK_SKIPPED_DUPLICATE',
+                        'wallet_id': wallet_id,
+                        'signals_processed': 0,
+                        'orders_submitted': 0,
+                        'orders_rejected': 0
+                    }
+                
+                # Place single proof-of-life order
+                intent = OrderIntent(
+                    wallet_id=wallet_id,
+                    ticker=proof_signal['ticker'],
+                    side=OrderSide.BUY,
+                    quantity=proof_signal['quantity'],
+                    order_type=OrderType.MARKET,
+                    market=Market.NASDAQ
+                )
+                
+                # Engine returns (order, rejection) tuple
+                order, rejection = self.engine.submit_order(intent)
+                
+                if order and not rejection:
+                    logger.info(f"✅ PROOF-OF-LIFE ORDER PLACED: {proof_signal['ticker']} x{proof_signal['quantity']} (Order ID: {order.id})")
+                    self.fallback_activated = True  # Prevent further fallback orders
+                    
+                    # Journal the attempt
+                    self._journal_proof_of_life(
+                        wallet_id=wallet_id,
+                        ticker=proof_signal['ticker'],
+                        quantity=proof_signal['quantity'],
+                        order_id=order.id,
+                        status='SUBMITTED',
+                        reason=proof_signal['reason']
+                    )
+                    
+                    return {
+                        'wallet_id': wallet_id,
+                        'proof_of_life': True,
+                        'order_id': str(order.id),
+                        'ticker': proof_signal['ticker'],
+                        'quantity': proof_signal['quantity'],
+                        'orders_submitted': 1,
+                        'orders_rejected': 0
+                    }
+                else:
+                    logger.error(f"❌ PROOF-OF-LIFE ORDER FAILED: {rejection}")
+                    
+                    # Journal the failure
+                    self._journal_proof_of_life(
+                        wallet_id=wallet_id,
+                        ticker=proof_signal['ticker'],
+                        quantity=proof_signal['quantity'],
+                        order_id=None,
+                        status='FAILED',
+                        reason=f"FALLBACK_FAILED: {rejection}"
+                    )
+                    
+                    return {
+                        'error': 'FALLBACK_ORDER_FAILED',
+                        'details': rejection,
+                        'wallet_id': wallet_id,
+                        'orders_submitted': 0,
+                        'orders_rejected': 1
+                    }
+            
             return {'error': 'NO_SIGNALS'}
+        else:
+            # Reset counter and timer when signals found
+            self.no_signal_cycles = 0
+            self.last_signal_check_time = None
         
         # Execute orders
         orders_submitted = 0
@@ -359,5 +451,90 @@ class StrategyRunner:
                 
                 logger.info(f"📊 Metrics snapshot: equity=${equity:.2f}, pnl=${equity - wallet.initial_balance:.2f}")
                 
+        finally:
+            conn.close()
+    
+    def _ensure_trade_journal_table(self) -> None:
+        """Ensure trade_journal table exists"""
+        conn = psycopg2.connect(self.engine.database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_journal (
+                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                        wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
+                        ticker TEXT NOT NULL,
+                        action TEXT NOT NULL CHECK (action IN ('BUY', 'SELL')),
+                        quantity INTEGER NOT NULL,
+                        order_id UUID,
+                        status TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        outcome TEXT,
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_trade_journal_wallet ON trade_journal(wallet_id)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_trade_journal_created ON trade_journal(created_at DESC)
+                """)
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def _journal_proof_of_life(
+        self,
+        wallet_id: UUID,
+        ticker: str,
+        quantity: int,
+        order_id: Optional[UUID],
+        status: str,
+        reason: str
+    ) -> None:
+        """
+        Journal proof-of-life trade attempt (Minimal Viable Journal)
+        
+        Args:
+            wallet_id: Wallet UUID
+            ticker: Stock ticker
+            quantity: Shares
+            order_id: Order ID (if submitted)
+            status: SUBMITTED | FAILED
+            reason: Why this trade was placed
+        """
+        # Ensure table exists
+        self._ensure_trade_journal_table()
+        
+        conn = psycopg2.connect(self.engine.database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trade_journal (
+                        wallet_id,
+                        ticker,
+                        action,
+                        quantity,
+                        order_id,
+                        status,
+                        reason,
+                        created_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, NOW()
+                    )
+                """, (
+                    wallet_id,
+                    ticker,
+                    'BUY',
+                    quantity,
+                    order_id,
+                    status,
+                    reason
+                ))
+                conn.commit()
+                logger.info(f"📝 Journaled proof-of-life: {ticker} x{quantity} ({status})")
+        except Exception as e:
+            logger.error(f"❌ Failed to journal proof-of-life: {e}")
+            conn.rollback()
         finally:
             conn.close()

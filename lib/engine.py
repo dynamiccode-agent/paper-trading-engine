@@ -16,6 +16,10 @@ from uuid import UUID, uuid4
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
+from psycopg2.extensions import register_adapter, AsIs
+
+# Register UUID adapter for psycopg2
+register_adapter(UUID, lambda u: AsIs(f"'{u}'::uuid"))
 
 from .types import (
     Order, OrderIntent, Quote, Trade, Position, Wallet,
@@ -90,6 +94,9 @@ class PaperTradingEngine:
                 quote = self.market_data.get_quote(intent.ticker, intent.market)
                 if not quote:
                     return None, "NO_MARKET_DATA"
+                
+                # 2a. Store quote in market_data table for equity calculations
+                self._store_market_quote(quote, intent.ticker, intent.market)
                 
                 # 3. Estimate order cost/proceeds
                 if intent.order_type == OrderType.MARKET:
@@ -532,6 +539,39 @@ class PaperTradingEngine:
             closed_at=row['closed_at'],
             updated_at=row['updated_at']
         )
+    
+    def _store_market_quote(self, quote: Quote, ticker: str, market: Market) -> None:
+        """Store market quote in market_data table for equity calculations"""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO market_data (
+                        ticker, market, price, bid, ask, volume, timestamp, fetched_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, NOW()
+                    )
+                    ON CONFLICT (ticker, market, timestamp) DO UPDATE SET
+                        price = EXCLUDED.price,
+                        bid = EXCLUDED.bid,
+                        ask = EXCLUDED.ask,
+                        volume = EXCLUDED.volume,
+                        fetched_at = NOW()
+                """, (
+                    ticker,
+                    market.value,
+                    quote.price,
+                    quote.bid,
+                    quote.ask,
+                    quote.volume,
+                    quote.timestamp
+                ))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to store market quote for {ticker}: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
     
     # =========================================================================
     # QUERY METHODS
