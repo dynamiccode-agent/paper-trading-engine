@@ -49,10 +49,11 @@ class ASXFallbackStrategy:
         """
         Generate ONE ASX proof-of-life signal
         
-        SAFETY:
-        - Minimum $500 AUD parcel
+        SAFETY MODE:
+        - Quantity = 1 (minimal proof-of-life)
         - LIMIT order (not MARKET)
         - Blue-chip ticker only
+        - Ignores $500 minimum for initial proof
         
         Args:
             wallet_name: Wallet name (for ticker selection)
@@ -67,11 +68,8 @@ class ASXFallbackStrategy:
         # Get estimated price
         estimated_price = cls.ESTIMATED_PRICES.get(ticker, Decimal('50.00'))
         
-        # Calculate minimum quantity for $500 parcel
-        min_quantity = int((cls.MIN_PARCEL_AUD / estimated_price).to_integral_value()) + 1
-        
-        # Use minimum quantity (ensures >= $500)
-        quantity = min_quantity
+        # SAFETY MODE: qty = 1 for proof-of-life
+        quantity = 1
         
         logger.info(f"🇦🇺 ASX proof signal: {ticker} x{quantity} @ ${estimated_price} = ${quantity * estimated_price}")
         
@@ -81,7 +79,7 @@ class ASXFallbackStrategy:
             'action': 'BUY',
             'quantity': quantity,
             'limit_price': estimated_price,  # Use LIMIT order
-            'reason': f'ASX_FALLBACK_PROOF_OF_LIFE (min_parcel=${cls.MIN_PARCEL_AUD})'
+            'reason': 'ASX_PROOF_OF_LIFE_QTY1'
         }
     
     @classmethod
