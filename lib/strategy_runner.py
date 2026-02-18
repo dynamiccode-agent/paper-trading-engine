@@ -82,7 +82,6 @@ class StrategyRunner:
         self.position_sizing = position_sizing
         self.no_signal_cycles = 0  # Track consecutive cycles with no signals
         self.last_signal_check_time = None  # Track last time we checked for signals
-        self.fallback_activated = False  # Track if fallback already executed
     
     def get_oracle_signals(self, market: str = 'US') -> List[dict]:
         """
@@ -196,70 +195,78 @@ class StrategyRunner:
             else:
                 logger.warning(f"No signals found (cycle {self.no_signal_cycles}, already counted)")
             
-            # FALLBACK: After 3 cycles with no signals, place proof-of-life trade
+            # FALLBACK: Place daily trade when Oracle signals unavailable
             from .fallback_strategy import FallbackStrategy
             
-            if FallbackStrategy.should_activate_fallback(self.no_signal_cycles) and not self.fallback_activated:
-                logger.info("🔄 FALLBACK ACTIVATED - Placing proof-of-life trade")
+            if FallbackStrategy.should_activate_fallback(self.no_signal_cycles):
+                # Check if wallet already traded today
+                conn_check = psycopg2.connect(self.oracle_db_url)
+                try:
+                    should_trade = FallbackStrategy.should_trade_today(str(wallet_id), conn_check)
+                finally:
+                    conn_check.close()
                 
-                # Generate proof-of-life signal (AAPL, 1 share)
-                proof_signal = FallbackStrategy.generate_proof_of_life_signal()
-                
-                # Check if already have AAPL position
-                if proof_signal['ticker'] in position_tickers:
-                    logger.info(f"⏭️  Proof-of-life SKIPPED - already have {proof_signal['ticker']} position")
+                if not should_trade:
+                    logger.info(f"⏭️  {wallet.name}: Already traded today (FALLBACK skipped)")
                     return {
-                        'error': 'FALLBACK_SKIPPED_DUPLICATE',
+                        'error': 'ALREADY_TRADED_TODAY',
                         'wallet_id': wallet_id,
                         'signals_processed': 0,
                         'orders_submitted': 0,
                         'orders_rejected': 0
                     }
                 
-                # Place single proof-of-life order
+                logger.info(f"🔄 FALLBACK ACTIVATED for {wallet.name} - Placing daily trade")
+                
+                # Generate wallet-specific fallback signal
+                fallback_signal = FallbackStrategy.generate_daily_signal(
+                    wallet_name=wallet.name,
+                    existing_tickers=position_tickers
+                )
+                
+                # Place fallback order
                 intent = OrderIntent(
                     wallet_id=wallet_id,
-                    ticker=proof_signal['ticker'],
+                    ticker=fallback_signal['ticker'],
                     side=OrderSide.BUY,
-                    quantity=proof_signal['quantity'],
+                    quantity=fallback_signal['quantity'],
                     order_type=OrderType.MARKET,
-                    market=Market.NASDAQ
+                    market=Market[fallback_signal['market']]
                 )
                 
                 # Engine returns (order, rejection) tuple
                 order, rejection = self.engine.submit_order(intent)
                 
                 if order and not rejection:
-                    logger.info(f"✅ PROOF-OF-LIFE ORDER PLACED: {proof_signal['ticker']} x{proof_signal['quantity']} (Order ID: {order.id})")
-                    self.fallback_activated = True  # Prevent further fallback orders
+                    logger.info(f"✅ FALLBACK ORDER PLACED: {wallet.name} → {fallback_signal['ticker']} x{fallback_signal['quantity']} (Order ID: {order.id})")
                     
                     # Journal the attempt
                     self._journal_proof_of_life(
                         wallet_id=wallet_id,
-                        ticker=proof_signal['ticker'],
-                        quantity=proof_signal['quantity'],
+                        ticker=fallback_signal['ticker'],
+                        quantity=fallback_signal['quantity'],
                         order_id=order.id,
                         status='SUBMITTED',
-                        reason=proof_signal['reason']
+                        reason=fallback_signal['reason']
                     )
                     
                     return {
                         'wallet_id': wallet_id,
-                        'proof_of_life': True,
+                        'fallback_daily': True,
                         'order_id': str(order.id),
-                        'ticker': proof_signal['ticker'],
-                        'quantity': proof_signal['quantity'],
+                        'ticker': fallback_signal['ticker'],
+                        'quantity': fallback_signal['quantity'],
                         'orders_submitted': 1,
                         'orders_rejected': 0
                     }
                 else:
-                    logger.error(f"❌ PROOF-OF-LIFE ORDER FAILED: {rejection}")
+                    logger.error(f"❌ FALLBACK ORDER FAILED for {wallet.name}: {rejection}")
                     
                     # Journal the failure
                     self._journal_proof_of_life(
                         wallet_id=wallet_id,
-                        ticker=proof_signal['ticker'],
-                        quantity=proof_signal['quantity'],
+                        ticker=fallback_signal['ticker'],
+                        quantity=fallback_signal['quantity'],
                         order_id=None,
                         status='FAILED',
                         reason=f"FALLBACK_FAILED: {rejection}"
