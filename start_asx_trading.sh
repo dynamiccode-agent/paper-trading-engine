@@ -40,8 +40,13 @@ fi
 
 echo "Starting ASX runner..."
 
-# Start ASX runner
-nohup python3 run_asx_trading.py > logs/runner_asx.log 2>&1 &
+# Start ASX runner using venv Python
+VENV_PYTHON="../oracle/venv312/bin/python"
+if [ ! -f "$VENV_PYTHON" ]; then
+    VENV_PYTHON="python3"
+fi
+
+nohup $VENV_PYTHON run_asx_trading.py > logs/runner_asx.log 2>&1 &
 ASX_PID=$!
 echo $ASX_PID > logs/runner_asx.pid
 
