@@ -513,33 +513,43 @@ class StrategyRunner:
         # Ensure table exists
         self._ensure_trade_journal_table()
         
+        import json
+        
         conn = psycopg2.connect(self.engine.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO trade_journal (
                         wallet_id,
+                        ts_utc,
+                        market,
                         ticker,
                         action,
-                        quantity,
-                        order_id,
-                        status,
-                        reason,
-                        created_at
+                        mode,
+                        signal_snapshot,
+                        reason_codes,
+                        order_request,
+                        order_response,
+                        fill,
+                        error
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, NOW()
+                        %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                 """, (
                     wallet_id,
+                    'US',
                     ticker,
                     'BUY',
-                    quantity,
-                    order_id,
-                    status,
-                    reason
+                    'FALLBACK',
+                    json.dumps({'quantity': quantity}),
+                    [reason],
+                    json.dumps({'quantity': quantity, 'order_type': 'MARKET'}),
+                    json.dumps({'order_id': str(order_id) if order_id else None, 'status': status}),
+                    json.dumps({}),
+                    None if order_id else f"FAILED: {status}"
                 ))
                 conn.commit()
-                logger.info(f"📝 Journaled proof-of-life: {ticker} x{quantity} ({status})")
+                logger.info(f"📝 Journaled fallback: {ticker} x{quantity} ({status})")
         except Exception as e:
             logger.error(f"❌ Failed to journal proof-of-life: {e}")
             conn.rollback()

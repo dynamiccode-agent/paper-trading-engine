@@ -62,13 +62,13 @@ class FallbackStrategy:
         # Pick random ticker from available
         ticker = random.choice(available)
         
-        # Determine market
-        if ticker in ['SPY', 'QQQ', 'DIA', 'IWM', 'VXX', 'UVXY', 'VIXY', 'SVXY']:
-            market = 'ETF'
+        # Determine market (ETFs trade on NYSE/NASDAQ)
+        if ticker in ['SPY', 'DIA', 'IWM']:
+            market = 'NYSE'
         elif ticker.startswith('XL'):
-            market = 'ETF'
+            market = 'NYSE'  # Sector ETFs trade on NYSE
         else:
-            market = 'NASDAQ'
+            market = 'NASDAQ'  # Default for stocks and QQQ, volatility ETFs
         
         # Conservative quantity based on strategy
         if wallet_name == 'Volatility-Long':
