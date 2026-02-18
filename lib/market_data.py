@@ -151,15 +151,19 @@ class AlphaVantageProvider(MarketDataProvider):
             'VIXY': Decimal('16'),
         }
         
+        import datetime
+        
         price = price_estimates.get(ticker, Decimal('150'))  # Default to $150
         bid, ask = self.get_spread_model(ticker, market, price)
         
         return Quote(
             ticker=ticker,
+            market=market,
+            price=price,
             bid=bid or price * Decimal('0.999'),
             ask=ask or price * Decimal('1.001'),
-            last=price,
-            volume=1000000  # Nominal volume
+            volume=1000000,  # Nominal volume
+            timestamp=datetime.datetime.now()
         )
     
     def _get_cache_key(self, ticker: str, market: Market) -> str:
