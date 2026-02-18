@@ -510,8 +510,8 @@ class StrategyRunner:
             status: SUBMITTED | FAILED
             reason: Why this trade was placed
         """
-        # Ensure table exists
-        self._ensure_trade_journal_table()
+        # Table already exists with correct schema (managed by migrations)
+        # self._ensure_trade_journal_table()
         
         import json
         
